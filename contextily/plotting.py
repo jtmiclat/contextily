@@ -25,7 +25,8 @@ def add_basemap(
     reset_extent=True,
     crs=None,
     resampling=Resampling.bilinear,
-    **extra_imshow_args
+    session=None,
+    **extra_imshow_args,
 ):
     """
     Add a (web/local) basemap to `ax`.
@@ -75,6 +76,8 @@ def add_basemap(
         [Optional. Default=Resampling.bilinear] Resampling
         method for executing warping, expressed as a
         `rasterio.enums.Resampling` method
+    session: None or requests.Session
+        [Optional. DEfault=None] Session to call tile servers
     **extra_imshow_args :
         Other parameters to be passed to `imshow`.
 
@@ -127,7 +130,14 @@ def add_basemap(
             )
         # Download image
         image, extent = bounds2img(
-            left, bottom, right, top, zoom=zoom, source=source, ll=False
+            left,
+            bottom,
+            right,
+            top,
+            zoom=zoom,
+            source=source,
+            ll=False,
+            session=session,
         )
         # Warping
         if crs is not None:

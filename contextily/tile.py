@@ -140,8 +140,17 @@ def bounds2raster(
         w, s = _sm2ll(w, s)
         e, n = _sm2ll(e, n)
     # Download
-    Z, ext = bounds2img(w, s, e, n, zoom=zoom, source=source, ll=True, n_connections=n_connections,
-                        use_cache=use_cache)
+    Z, ext = bounds2img(
+        w,
+        s,
+        e,
+        n,
+        zoom=zoom,
+        source=source,
+        ll=True,
+        n_connections=n_connections,
+        use_cache=use_cache,
+    )
 
     # Write
     # ---
@@ -171,7 +180,16 @@ def bounds2raster(
 
 
 def bounds2img(
-    w, s, e, n, zoom="auto", source=None, ll=False, wait=0, max_retries=2, n_connections=1, use_cache=True
+    w,
+    s,
+    e,
+    n,
+    zoom="auto",
+    source=None,
+    ll=False,
+    n_connections=1,
+    use_cache=True,
+    session=None,
 ):
     """
     Take bounding box and zoom and return an image with all the tiles
@@ -201,14 +219,6 @@ def bounds2img(
     ll : Boolean
         [Optional. Default: False] If True, `w`, `s`, `e`, `n` are
         assumed to be lon/lat as opposed to Spherical Mercator.
-    wait : int
-        [Optional. Default: 0]
-        if the tile API is rate-limited, the number of seconds to wait
-        between a failed request and the next try
-    max_retries: int
-        [Optional. Default: 2]
-        total number of rejected requests allowed before contextily
-        will stop trying to fetch more tiles from a rate-limited API.
     n_connections: int
         [Optional. Default: 1]
         Number of connections for downloading tiles in parallel. Be careful not to overload the tile server and to check
@@ -220,6 +230,9 @@ def bounds2img(
         If False, caching of the downloaded tiles will be disabled. This can be useful in resource constrained
         environments, especially when using n_connections > 1, or when a tile provider's terms of use don't allow
         caching.
+    session: requests.Session
+        [Optional. Default: None]
+        If None, will use default requests.get("")
 
     Returns
     -------
@@ -245,16 +258,17 @@ def bounds2img(
     tile_urls = [provider.build_url(x=tile.x, y=tile.y, z=tile.z) for tile in tiles]
     # download tiles
     if n_connections < 1 or not isinstance(n_connections, int):
-        raise ValueError(
-            f"n_connections must be a positive integer value."
-        )
+        raise ValueError(f"n_connections must be a positive integer value.")
     # Use threads for a single connection to avoid the overhead of spawning a process. Use processes for multiple
     # connections if caching is enabled, as threads lead to memory issues when used in combination with the joblib
     # memory caching (used for the _fetch_tile() function).
-    preferred_backend = "threads" if (n_connections == 1 or not use_cache) else "processes"
+    preferred_backend = (
+        "threads" if (n_connections == 1 or not use_cache) else "processes"
+    )
     fetch_tile_fn = memory.cache(_fetch_tile) if use_cache else _fetch_tile
     arrays = Parallel(n_jobs=n_connections, prefer=preferred_backend)(
-        delayed(fetch_tile_fn)(tile_url, wait, max_retries) for tile_url in tile_urls)
+        delayed(fetch_tile_fn)(tile_url, session) for tile_url in tile_urls
+    )
     # merge downloaded tiles
     merged, extent = _merge_tiles(tiles, arrays)
     # lon/lat extent --> Spheric Mercator
@@ -281,8 +295,27 @@ def _process_source(source):
     return provider
 
 
-def _fetch_tile(tile_url, wait, max_retries):
-    request = _retryer(tile_url, wait, max_retries)
+from requests import Session
+from requests.adapters import HTTPAdapter, Retry
+
+
+def _fetch_tile(tile_url, session):
+    if session is None:
+        session = Session()
+        session.mount("http://", HTTPAdapter(max_retries=2))
+        session.mount("https://", HTTPAdapter(max_retries=2))
+    try:
+        request = session.get(tile_url, headers={"user-agent": USER_AGENT})
+        request.raise_for_status()
+    except requests.HTTPError as e:
+        if request.status_code == 404:
+            raise requests.HTTPError(
+                "Tile URL resulted in a 404 error. "
+                "Double-check your tile url:\n{}".format(tile_url)
+            )
+        else:
+            raise e
+
     with io.BytesIO(request.content) as image_stream:
         image = Image.open(image_stream).convert("RGBA")
         array = np.asarray(image)
@@ -402,45 +435,6 @@ def _warper(img, transform, s_crs, t_crs, resampling):
                 transform = vrt.transform
 
     return img, bounds, transform
-
-
-def _retryer(tile_url, wait, max_retries):
-    """
-    Retry a url many times in attempt to get a tile
-
-    Arguments
-    ---------
-    tile_url : str
-        string that is the target of the web request. Should be
-        a properly-formatted url for a tile provider.
-    wait : int
-        if the tile API is rate-limited, the number of seconds to wait
-        between a failed request and the next try
-    max_retries : int
-        total number of rejected requests allowed before contextily
-        will stop trying to fetch more tiles from a rate-limited API.
-
-    Returns
-    -------
-    request object containing the web response.
-    """
-    try:
-        request = requests.get(tile_url, headers={"user-agent": USER_AGENT})
-        request.raise_for_status()
-    except requests.HTTPError:
-        if request.status_code == 404:
-            raise requests.HTTPError(
-                "Tile URL resulted in a 404 error. "
-                "Double-check your tile url:\n{}".format(tile_url)
-            )
-        elif request.status_code == 104:
-            if max_retries > 0:
-                os.wait(wait)
-                max_retries -= 1
-                request = _retryer(tile_url, wait, max_retries)
-            else:
-                raise requests.HTTPError("Connection reset by peer too many times.")
-    return request
 
 
 def howmany(w, s, e, n, zoom, verbose=True, ll=False):
